@@ -476,7 +476,7 @@ class EmailClient:
             # Login and select inbox
             await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
             await _send_imap_id(imap)
-            await imap.select(_quote_mailbox(mailbox))
+            await imap.examine(_quote_mailbox(mailbox))
             search_criteria = self._build_search_criteria(
                 before,
                 since,
@@ -522,7 +522,7 @@ class EmailClient:
             # Login and select mailbox
             await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
             await _send_imap_id(imap)
-            await imap.select(_quote_mailbox(mailbox))
+            await imap.examine(_quote_mailbox(mailbox))
 
             search_criteria = self._build_search_criteria(
                 before,
@@ -612,7 +612,10 @@ class EmailClient:
 
     async def _fetch_email_with_formats(self, imap, email_id: str) -> list | None:
         """Try different fetch formats to get email data."""
-        fetch_formats = ["RFC822", "BODY[]", "BODY.PEEK[]", "(BODY.PEEK[])"]
+        # Read-only fetch: BODY.PEEK[] does NOT set the \Seen flag.
+        # Server-side fallbacks for IMAP servers that reject BODY.PEEK[].
+        # Closes #161.
+        fetch_formats = ["BODY.PEEK[]", "(BODY.PEEK[])", "RFC822", "BODY[]"]
 
         for fetch_format in fetch_formats:
             try:
@@ -636,7 +639,7 @@ class EmailClient:
             # Login and select inbox
             await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
             await _send_imap_id(imap)
-            await imap.select(_quote_mailbox(mailbox))
+            await imap.examine(_quote_mailbox(mailbox))
 
             # Fetch the specific email by UID
             data = await self._fetch_email_with_formats(imap, email_id)
@@ -689,7 +692,7 @@ class EmailClient:
 
             await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
             await _send_imap_id(imap)
-            await imap.select(_quote_mailbox(mailbox))
+            await imap.examine(_quote_mailbox(mailbox))
 
             data = await self._fetch_email_with_formats(imap, email_id)
             if not data:
