@@ -55,6 +55,12 @@ class EmailContentBatchResponse(BaseModel):
     failed_ids: list[str]
 
 
+class EmailMetadataWithFolder(EmailMetadata):
+    """Email metadata annotated with its source folder (used by search_all_folders)."""
+
+    folder: str
+
+
 class AttachmentDownloadResponse(BaseModel):
     """Attachment download response"""
 

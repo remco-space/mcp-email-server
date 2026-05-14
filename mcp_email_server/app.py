@@ -15,6 +15,7 @@ from mcp_email_server.emails.models import (
     AttachmentDownloadResponse,
     EmailContentBatchResponse,
     EmailMetadataPageResponse,
+    EmailMetadataWithFolder,
 )
 
 mcp = FastMCP("email")
@@ -98,6 +99,72 @@ async def list_emails_metadata(
         flagged=flagged,
         answered=answered,
     )
+
+
+@mcp.tool(
+    description="Search across ALL folders in the account at once. Useful when you don't know which folder an email is in. Returns matches sorted by date descending, each annotated with its source folder. Default skips Trash/Spam/Junk; pass skip_folders=[] to include them.",
+)
+async def search_all_folders(
+    account_name: Annotated[str, Field(description="The name of the email account.")],
+    page_size: Annotated[int, Field(description="Maximum number of results to return across all folders.")] = 50,
+    before: Annotated[
+        datetime | None,
+        Field(default=None, description="Retrieve emails before this datetime (UTC)."),
+    ] = None,
+    since: Annotated[
+        datetime | None,
+        Field(default=None, description="Retrieve emails since this datetime (UTC)."),
+    ] = None,
+    subject: Annotated[str | None, Field(default=None, description="Filter emails by subject.")] = None,
+    from_address: Annotated[str | None, Field(default=None, description="Filter emails by sender address.")] = None,
+    to_address: Annotated[
+        str | None,
+        Field(default=None, description="Filter emails by recipient address."),
+    ] = None,
+    seen: Annotated[
+        bool | None,
+        Field(default=None, description="Filter by read status: True=read, False=unread, None=all."),
+    ] = None,
+    flagged: Annotated[
+        bool | None,
+        Field(default=None, description="Filter by flagged/starred status: True=flagged, False=unflagged, None=all."),
+    ] = None,
+    answered: Annotated[
+        bool | None,
+        Field(default=None, description="Filter by replied status: True=replied, False=not replied, None=all."),
+    ] = None,
+    skip_folders: Annotated[
+        list[str] | None,
+        Field(description="Folders to skip. Default: ['Trash', 'Spam', 'Junk']. Pass [] to include all."),
+    ] = None,
+) -> list[EmailMetadataWithFolder]:
+    handler = dispatch_handler(account_name)
+    results = []
+    async for meta in handler.search_all_folders_metadata(
+        page_size=page_size,
+        before=before,
+        since=since,
+        subject=subject,
+        from_address=from_address,
+        to_address=to_address,
+        seen=seen,
+        flagged=flagged,
+        answered=answered,
+        skip_folders=skip_folders,
+    ):
+        results.append(
+            EmailMetadataWithFolder(
+                email_id=meta["email_id"],
+                message_id=meta.get("message_id"),
+                subject=meta["subject"],
+                sender=meta["from"],
+                recipients=meta.get("to", []),
+                date=meta["date"],
+                attachments=meta.get("attachments", []),
+                folder=meta["folder"],
+            )
+        )
+    return results
 
 
 @mcp.tool(

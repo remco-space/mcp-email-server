@@ -79,6 +79,28 @@ async def _send_imap_id(imap: aioimaplib.IMAP4 | aioimaplib.IMAP4_SSL) -> None:
         logger.warning(f"IMAP ID command failed: {e!s}")
 
 
+async def _examine_mailbox(imap: aioimaplib.IMAP4 | aioimaplib.IMAP4_SSL, mailbox: str) -> str:
+    """Open a mailbox in read-only mode (EXAMINE) and update client state to SELECTED.
+
+    aioimaplib's ``imap.examine()`` uses ``simple_command`` internally which sends the
+    IMAP EXAMINE command to the server (putting it in read-only selected state) but does
+    NOT update the client-side ``protocol.state`` to ``SELECTED``.  Subsequent commands
+    that require SELECTED state (SEARCH, FETCH, …) therefore raise an Abort error.
+
+    This helper sends EXAMINE and then patches ``imap.protocol.state = 'SELECTED'`` so
+    that the aioimaplib state machine allows the follow-up commands.  The IMAP server
+    remains in read-only mode — no writes can occur.
+
+    Returns the examine result string for callers that need to check OK/NO.
+    """
+    result = await imap.examine(mailbox)
+    # Patch client-side state: EXAMINE succeeds server-side but aioimaplib's
+    # simple_command() does not transition state to SELECTED.
+    if result and str(result[0]).upper() == "OK":
+        imap.protocol.state = "SELECTED"
+    return result
+
+
 def _create_ssl_context(verify_ssl: bool) -> ssl.SSLContext | None:
     """Create SSL context for SMTP/IMAP connections.
 
@@ -476,7 +498,7 @@ class EmailClient:
             # Login and select inbox
             await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
             await _send_imap_id(imap)
-            await imap.examine(_quote_mailbox(mailbox))
+            await _examine_mailbox(imap, _quote_mailbox(mailbox))
             search_criteria = self._build_search_criteria(
                 before,
                 since,
@@ -522,7 +544,7 @@ class EmailClient:
             # Login and select mailbox
             await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
             await _send_imap_id(imap)
-            await imap.examine(_quote_mailbox(mailbox))
+            await _examine_mailbox(imap, _quote_mailbox(mailbox))
 
             search_criteria = self._build_search_criteria(
                 before,
@@ -583,6 +605,197 @@ class EmailClient:
             except Exception as e:
                 logger.info(f"Error during logout: {e}")
 
+    async def search_all_folders_metadata(
+        self,
+        *,
+        page_size: int = 50,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        subject: str | None = None,
+        from_address: str | None = None,
+        to_address: str | None = None,
+        seen: bool | None = None,
+        flagged: bool | None = None,
+        answered: bool | None = None,
+        skip_folders: list[str] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Search across ALL IMAP folders in a single call.
+
+        Yields dicts with the same shape as get_emails_metadata_stream, plus
+        a ``folder`` key indicating the source folder.  Results are sorted by
+        date descending and limited to *page_size* across all folders.
+
+        Uses examine() (read-only) for every folder — never select().
+        """
+        if skip_folders is None:
+            skip_folders = ["Trash", "Spam", "Junk"]
+
+        imap = self._imap_connect()
+        try:
+            await imap._client_task
+            await imap.wait_hello_from_server()
+
+            await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
+            await _send_imap_id(imap)
+
+            # --- Phase 1: LIST all folders ---
+            _, folder_lines = await imap.list('""', "*")
+            logger.info(f"search_all_folders: LIST returned {len(folder_lines)} lines")
+
+            folder_names: list[str] = []
+            for line in folder_lines:
+                if not isinstance(line, (bytes, bytearray)):
+                    continue
+                try:
+                    line_str = line.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+
+                # Skip \Noselect folders
+                if r"\Noselect" in line_str or "\\Noselect" in line_str:
+                    continue
+
+                # Parse folder name: the last token after the hierarchy delimiter.
+                # Format: (\flags) "." FolderName   or   (\flags) "." "Folder Name"
+                # Strip leading/trailing whitespace from line
+                line_str = line_str.strip()
+
+                # Find the delimiter token (e.g. "." or "/") and take everything after it.
+                # The delimiter is typically the second quoted token.
+                try:
+                    # Match: (flags) delim name
+                    # Find end of flags group first
+                    flags_end = line_str.index(")")
+                    rest = line_str[flags_end + 1:].strip()
+                    # rest is: "delim" FolderName  or  delim FolderName
+                    # Skip the delimiter token
+                    if rest.startswith('"'):
+                        # quoted delimiter
+                        delim_end = rest.index('"', 1)
+                        rest = rest[delim_end + 1:].strip()
+                    else:
+                        # unquoted delimiter (or NIL)
+                        parts = rest.split(None, 1)
+                        rest = parts[1].strip() if len(parts) > 1 else ""
+
+                    # rest is now the folder name, possibly quoted
+                    if not rest:
+                        continue
+                    if rest.startswith('"'):
+                        # quoted name — strip quotes and unescape
+                        folder_name = rest[1:rest.rindex('"')].replace('\\"', '"').replace("\\\\", "\\")
+                    else:
+                        folder_name = rest
+                except Exception:
+                    logger.debug(f"search_all_folders: could not parse folder line: {line_str!r}")
+                    continue
+
+                if not folder_name:
+                    continue
+                if folder_name in skip_folders:
+                    logger.debug(f"search_all_folders: skipping folder {folder_name!r}")
+                    continue
+                folder_names.append(folder_name)
+
+            logger.info(f"search_all_folders: {len(folder_names)} selectable folders to search")
+
+            # --- Phase 2: EXAMINE each folder, collect (date, uid, folder) tuples ---
+            search_criteria = self._build_search_criteria(
+                before, since, subject,
+                from_address=from_address,
+                to_address=to_address,
+                seen=seen,
+                flagged=flagged,
+                answered=answered,
+            )
+            logger.info(f"search_all_folders: search criteria: {search_criteria}")
+
+            all_matches: list[tuple[datetime, str, str]] = []  # (date, uid, folder_name)
+
+            folders_searched = 0
+            folders_with_matches = 0
+            for folder_name in folder_names:
+                try:
+                    await _examine_mailbox(imap, _quote_mailbox(folder_name))
+                except Exception as e:
+                    logger.info(f"search_all_folders: skip {folder_name!r}: examine failed: {e}")
+                    continue
+                folders_searched += 1
+
+                try:
+                    _, messages = await imap.uid_search(*search_criteria)
+                except Exception as e:
+                    logger.info(f"search_all_folders: skip {folder_name!r}: search error: {e}")
+                    continue
+
+                if not messages or not messages[0]:
+                    continue
+                email_ids = messages[0].split()
+                if not email_ids:
+                    continue
+                folders_with_matches += 1
+                logger.info(f"search_all_folders: {folder_name!r} → {len(email_ids)} match(es)")
+
+                try:
+                    uid_dates = await self._batch_fetch_dates(imap, email_ids)
+                except Exception as e:
+                    logger.info(f"search_all_folders: date fetch error in {folder_name!r}: {e}")
+                    continue
+
+                for uid, dt in uid_dates.items():
+                    all_matches.append((dt, uid, folder_name))
+
+            logger.info(f"search_all_folders: searched {folders_searched}/{len(folder_names)} folders, {folders_with_matches} had matches, {len(all_matches)} total tuples")
+
+            if not all_matches:
+                logger.info("search_all_folders: no matches found across all folders")
+                return
+
+            # --- Phase 3: Sort by date desc, take top page_size ---
+            all_matches.sort(key=lambda x: x[0], reverse=True)
+            top_matches = all_matches[:page_size]
+            logger.info(f"search_all_folders: {len(all_matches)} total matches, returning top {len(top_matches)}")
+
+            # --- Phase 4: Group by folder, fetch headers ---
+            from collections import defaultdict
+            by_folder: dict[str, list[str]] = defaultdict(list)
+            uid_to_folder: dict[str, str] = {}
+            for _dt, uid, folder_name in top_matches:
+                by_folder[folder_name].append(uid)
+                uid_to_folder[uid] = folder_name
+
+            # Build an order map so we can yield in sorted order at the end
+            uid_order: dict[str, int] = {uid: idx for idx, (_dt, uid, _f) in enumerate(top_matches)}
+            collected: dict[str, dict[str, Any]] = {}
+
+            for folder_name, uids in by_folder.items():
+                try:
+                    await _examine_mailbox(imap, _quote_mailbox(folder_name))
+                except Exception as e:
+                    logger.warning(f"search_all_folders: re-EXAMINE error for {folder_name!r}: {e}")
+                    continue
+
+                try:
+                    headers_by_uid = await self._batch_fetch_headers(imap, uids)
+                except Exception as e:
+                    logger.warning(f"search_all_folders: header fetch error in {folder_name!r}: {e}")
+                    continue
+
+                for uid, meta in headers_by_uid.items():
+                    meta["folder"] = folder_name
+                    collected[uid] = meta
+
+            # Yield in sorted (desc date) order
+            for _dt, uid, _folder_name in top_matches:
+                if uid in collected:
+                    yield collected[uid]
+
+        finally:
+            try:
+                await imap.logout()
+            except Exception as e:
+                logger.info(f"search_all_folders: error during logout: {e}")
+
     def _check_email_content(self, data: list) -> bool:
         """Check if the fetched data contains actual email content."""
         for item in data:
@@ -639,7 +852,7 @@ class EmailClient:
             # Login and select inbox
             await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
             await _send_imap_id(imap)
-            await imap.examine(_quote_mailbox(mailbox))
+            await _examine_mailbox(imap, _quote_mailbox(mailbox))
 
             # Fetch the specific email by UID
             data = await self._fetch_email_with_formats(imap, email_id)
@@ -692,7 +905,7 @@ class EmailClient:
 
             await imap.login(self.email_server.user_name, self.email_server.password.get_secret_value())
             await _send_imap_id(imap)
-            await imap.examine(_quote_mailbox(mailbox))
+            await _examine_mailbox(imap, _quote_mailbox(mailbox))
 
             data = await self._fetch_email_with_formats(imap, email_id)
             if not data:
@@ -1152,6 +1365,35 @@ class ClassicEmailHandler(EmailHandler):
                 )
             except Exception as e:
                 logger.error(f"Failed to save email to Sent folder: {e}", exc_info=True)
+
+    async def search_all_folders_metadata(
+        self,
+        *,
+        page_size: int = 50,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        subject: str | None = None,
+        from_address: str | None = None,
+        to_address: str | None = None,
+        seen: bool | None = None,
+        flagged: bool | None = None,
+        answered: bool | None = None,
+        skip_folders: list[str] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Search across all IMAP folders. Delegates to EmailClient.search_all_folders_metadata."""
+        async for item in self.incoming_client.search_all_folders_metadata(
+            page_size=page_size,
+            before=before,
+            since=since,
+            subject=subject,
+            from_address=from_address,
+            to_address=to_address,
+            seen=seen,
+            flagged=flagged,
+            answered=answered,
+            skip_folders=skip_folders,
+        ):
+            yield item
 
     async def delete_emails(self, email_ids: list[str], mailbox: str = "INBOX") -> tuple[list[str], list[str]]:
         """Delete emails by their UIDs. Returns (deleted_ids, failed_ids)."""
