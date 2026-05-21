@@ -488,6 +488,8 @@ class EmailClient:
         seen: bool | None = None,
         flagged: bool | None = None,
         answered: bool | None = None,
+        body: str | None = None,
+        text: str | None = None,
     ) -> int:
         imap = self._imap_connect()
         try:
@@ -508,6 +510,8 @@ class EmailClient:
                 seen=seen,
                 flagged=flagged,
                 answered=answered,
+                body=body,
+                text=text,
             )
             logger.info(f"Count: Search criteria: {search_criteria}")
             # Search for messages and count them - use UID SEARCH for consistency
@@ -534,6 +538,8 @@ class EmailClient:
         seen: bool | None = None,
         flagged: bool | None = None,
         answered: bool | None = None,
+        body: str | None = None,
+        text: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         imap = self._imap_connect()
         try:
@@ -555,6 +561,8 @@ class EmailClient:
                 seen=seen,
                 flagged=flagged,
                 answered=answered,
+                body=body,
+                text=text,
             )
             logger.info(f"Get metadata: Search criteria: {search_criteria}")
 
@@ -617,6 +625,8 @@ class EmailClient:
         seen: bool | None = None,
         flagged: bool | None = None,
         answered: bool | None = None,
+        body: str | None = None,
+        text: str | None = None,
         skip_folders: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Search across ALL IMAP folders in a single call.
@@ -707,6 +717,8 @@ class EmailClient:
                 seen=seen,
                 flagged=flagged,
                 answered=answered,
+                body=body,
+                text=text,
             )
             logger.info(f"search_all_folders: search criteria: {search_criteria}")
 
@@ -1267,6 +1279,8 @@ class ClassicEmailHandler(EmailHandler):
         seen: bool | None = None,
         flagged: bool | None = None,
         answered: bool | None = None,
+        body: str | None = None,
+        text: str | None = None,
     ) -> EmailMetadataPageResponse:
         emails = []
         async for email_data in self.incoming_client.get_emails_metadata_stream(
@@ -1282,6 +1296,8 @@ class ClassicEmailHandler(EmailHandler):
             seen,
             flagged,
             answered,
+            body=body,
+            text=text,
         ):
             emails.append(EmailMetadata.from_email(email_data))
         total = await self.incoming_client.get_email_count(
@@ -1294,6 +1310,8 @@ class ClassicEmailHandler(EmailHandler):
             seen=seen,
             flagged=flagged,
             answered=answered,
+            body=body,
+            text=text,
         )
         return EmailMetadataPageResponse(
             page=page,
@@ -1378,6 +1396,8 @@ class ClassicEmailHandler(EmailHandler):
         seen: bool | None = None,
         flagged: bool | None = None,
         answered: bool | None = None,
+        body: str | None = None,
+        text: str | None = None,
         skip_folders: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Search across all IMAP folders. Delegates to EmailClient.search_all_folders_metadata."""
@@ -1391,6 +1411,8 @@ class ClassicEmailHandler(EmailHandler):
             seen=seen,
             flagged=flagged,
             answered=answered,
+            body=body,
+            text=text,
             skip_folders=skip_folders,
         ):
             yield item
