@@ -82,6 +82,20 @@ async def list_emails_metadata(
         bool | None,
         Field(default=None, description="Filter by replied status: True=replied, False=not replied, None=all."),
     ] = None,
+    body: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Filter by string in the email body (IMAP BODY search). On Solr-backed FTS servers (e.g. pino), also matches text extracted from PDF and other indexed attachments. On vanilla IMAP (posteo), matches plaintext body parts only.",
+        ),
+    ] = None,
+    text: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Filter by string in headers OR body (IMAP TEXT search). Broader than body=. Prefer body=/subject=/from_address= for targeted searches; use text= only when you don't care where the match lives.",
+        ),
+    ] = None,
 ) -> EmailMetadataPageResponse:
     handler = dispatch_handler(account_name)
 
@@ -98,6 +112,8 @@ async def list_emails_metadata(
         seen=seen,
         flagged=flagged,
         answered=answered,
+        body=body,
+        text=text,
     )
 
 
@@ -133,6 +149,20 @@ async def search_all_folders(
         bool | None,
         Field(default=None, description="Filter by replied status: True=replied, False=not replied, None=all."),
     ] = None,
+    body: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Filter by string in the email body (IMAP BODY search). On Solr-backed FTS servers (e.g. pino), also matches text extracted from PDF and other indexed attachments. On vanilla IMAP (posteo), matches plaintext body parts only.",
+        ),
+    ] = None,
+    text: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Filter by string in headers OR body (IMAP TEXT search). Broader than body=. Prefer body=/subject=/from_address= for targeted searches; use text= only when you don't care where the match lives.",
+        ),
+    ] = None,
     skip_folders: Annotated[
         list[str] | None,
         Field(description="Folders to skip. Default: ['Trash', 'Spam', 'Junk']. Pass [] to include all."),
@@ -150,6 +180,8 @@ async def search_all_folders(
         seen=seen,
         flagged=flagged,
         answered=answered,
+        body=body,
+        text=text,
         skip_folders=skip_folders,
     ):
         results.append(
